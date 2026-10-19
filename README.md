@@ -2,7 +2,7 @@
 
 OCS 报「页面任务点数量为空」时，自动切到下一节。
 
-![version](https://img.shields.io/badge/version-3.8.1-blue)
+![version](https://img.shields.io/badge/version-3.8.2-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ## 问题

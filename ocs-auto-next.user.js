@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         OCS 任务点为空 · 自动下一节
 // @namespace    https://local.ocs.helper
-// @version      3.8.1
+// @version      3.8.2
 // @description  当 OCS 提示「页面任务点数量为空! 请刷新重试!」时，自动把超星课程切换到下一节；一直跳到没有下一节为止。
 // @author       YG
+// @namespace    https://github.com/KoishiYU/chaoxing-auto-next
+// @supportURL   https://github.com/KoishiYU/chaoxing-auto-next/issues
 // @match        *://*.chaoxing.com/*
 // @match        *://*.chaoxing.cn/*
 // @match        *://*.edu.cn/*
@@ -12,6 +14,8 @@
 // @grant        unsafeWindow
 // @run-at       document-start
 // @license      MIT
+// @updateURL    https://cdn.jsdelivr.net/gh/KoishiYU/chaoxing-auto-next@main/ocs-auto-next.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/KoishiYU/chaoxing-auto-next@main/ocs-auto-next.user.js
 // ==/UserScript==
 
 (function () {
@@ -24,7 +28,7 @@
 	}
 
 	const TAG = '[自动下一节]';
-	const VERSION = '3.8.1';
+	const VERSION = '3.8.2';
 	const STORE_KEY = 'ocs-auto-next:cfg:v3';
 	const LAST_JUMP_KEY = 'ocs-auto-next:lastjump';
 	const PENDING_KEY = 'ocs-auto-next:pending';
