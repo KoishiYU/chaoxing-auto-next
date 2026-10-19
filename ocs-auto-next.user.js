@@ -14,8 +14,8 @@
 // @grant        unsafeWindow
 // @run-at       document-start
 // @license      MIT
-// @updateURL    https://cdn.jsdelivr.net/gh/KoishiYU/chaoxing-auto-next@main/ocs-auto-next.user.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/KoishiYU/chaoxing-auto-next@main/ocs-auto-next.user.js
+// @updateURL    https://raw.githubusercontent.com/KoishiYU/chaoxing-auto-next/main/ocs-auto-next.user.js
+// @downloadURL  https://raw.githubusercontent.com/KoishiYU/chaoxing-auto-next/main/ocs-auto-next.user.js
 // ==/UserScript==
 
 (function () {
