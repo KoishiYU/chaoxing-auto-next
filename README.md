@@ -2,7 +2,7 @@
 
 OCS 报「页面任务点数量为空」时，自动切到下一节。
 
-![version](https://img.shields.io/badge/version-3.13.1-blue)
+![version](https://img.shields.io/badge/version-3.14.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ## 问题
@@ -95,11 +95,14 @@ if (v.error) return false;
 if (!(v.currentSrc || v.src)) return false;
 ```
 
-同一节两个视频同时 `play()` 会互顶（播放器单例），改成每轮只驱动一个：
+同一节两个视频同时 `play()` 会互顶（播放器单例）。现在的规则是**跟随而不是抢**：
 
 ```js
-const target = list.find(it => !(it.dur && it.dur - it.cur < 1.5));
+const playing = list.find(it => !it.paused);
+if (playing) return follow(playing);   // 有在播的就不碰别的
 ```
+
+另外超星会给同一个视频塞两个 `<video>`（一个真播放器 `ready=4`，一个隐藏副本 `ready=0`），按 `src` 去重后再计数，否则分母虚高永远到不了头。
 
 ## 兼容
 
@@ -110,6 +113,8 @@ const target = list.find(it => !(it.dur && it.dur - it.cur < 1.5));
 ## FAQ
 
 **媒体 0/0，二十秒就跳走** —— 视频没加载出来，刷新重试。
+**几个视频来回抢播放** —— 3.14.0 已修（跟随正在播的那个，不再 re-play 被暂停的）。仍是旧版就更新。
+**媒体推不动，跳过：xx/xxs** —— 那个视频的 src 失效或需要点播放器按钮，脚本会跳过它继续下一个。
 **没找到学习页** —— 未适配的皮肤，点「结构」输出结构。
 **跳节后卡住** —— 间隔调到 15000。
 **进度被清空** —— 触发风控。倍速降到 1，间隔 15000，停一天。
