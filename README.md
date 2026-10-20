@@ -2,7 +2,7 @@
 
 OCS 报「页面任务点数量为空」时，自动切到下一节。
 
-![version](https://img.shields.io/badge/version-3.8.2-blue)
+![version](https://img.shields.io/badge/version-3.13.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ## 问题
@@ -25,6 +25,8 @@ top.document.querySelectorAll('[onclick^="getTeacherAjax"]')
 2. **判断本节是否学完** —— 视频播完 / 任务点完成 / 无媒体超时放行
 3. **跳节并确认** —— 点目录项会整页刷新，所以点击前写 `localStorage`，新页面加载后比对当前节，成功才计数
 
+一节里的多个 tab（如「1 典型案例 / 2 基本内涵」）会逐个走完；附件/文档型任务点主动点开停留；已学过的视频不重放。
+
 内置「方案 B」：不装 OCS 也能跑，脚本自己按倍速驱动 `<video>`。
 
 ## 安装
@@ -42,6 +44,8 @@ top.document.querySelectorAll('[onclick^="getTeacherAjax"]')
 | 自己放视频 | 开 | 关掉则只判断、不驱动播放 |
 | 倍速 | 2 | 建议 ≤ 2，超过容易触发风控 |
 | 间隔 | 8000 | 跳节冷却（毫秒） |
+| 附件停留 | 10 | 文档/附件任务点点开后停留多少秒 |
+| 空节确认 | 12 | 没找到任何任务点时等多久才判「这节真没东西」 |
 
 按钮：`跳一节` 手动跳一次 · `诊断` 输出页面结构与媒体状态 · `结构` 探测目录 DOM。
 
