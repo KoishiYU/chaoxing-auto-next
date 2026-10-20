@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OCS 任务点为空 · 自动下一节
 // @namespace    https://local.ocs.helper
-// @version      3.14.1
+// @version      3.14.2
 // @description  当 OCS 提示「页面任务点数量为空! 请刷新重试!」时，自动把超星课程切换到下一节；一直跳到没有下一节为止。
 // @author       YG
 // @namespace    https://github.com/KoishiYU/chaoxing-auto-next
@@ -28,7 +28,7 @@
 	}
 
 	const TAG = '[自动下一节]';
-	const VERSION = '3.14.1';
+	const VERSION = '3.14.2';
 	const STORE_KEY = 'ocs-auto-next:cfg:v3';
 	const LAST_JUMP_KEY = 'ocs-auto-next:lastjump';
 	const PENDING_KEY = 'ocs-auto-next:pending';
@@ -1724,12 +1724,25 @@
 		if (now() - toastTriggeredAt < 2500) return;
 		toastTriggeredAt = now();
 		if (!cfg.enabled || rt.busy || rt.endReached) return;
-		// 方案 B 开着时，由 tickLearn 决定何时跳：必须等本节媒体播完，
-		// 否则 OCS 每 2.5 秒报一次「任务点为空」就会把播放打断
-		if (cfg.learn) {
-			rt.learnNote = 'OCS 报任务点为空，等本节媒体播完再跳';
-			return;
+
+		// OCS 报「任务点数量为空」只是说它解析不到章节目录，**不代表本节学完了**。
+		// 实测（第 200 节）：视频 cur=24/161 还在播，OCS 一报错脚本就跳走，把学习打断。
+		// 所以先看真实完成度，还有没播完的视频就不跳。
+		const m = mediaDone();
+		if (m.total > 0 && m.done < m.total) {
+			const key = m.done + '/' + m.total;
+			if (rt.toastWaitKey !== key) {
+				rt.toastWaitKey = key;
+				rt.toastWaitAt = now();
+			}
+			if (now() - (rt.toastWaitAt || now()) < 180000) {
+				rt.learnNote =
+					'OCS 报任务点为空，但本节还有 ' + (m.total - m.done) + ' 个视频没播完，等播完再跳';
+				return;
+			}
+			log('媒体 3 分钟没进展，不再等，放行跳节', 'warn');
 		}
+		rt.toastWaitKey = '';
 		jumpOnce('OCS 提示任务点为空');
 	}
 
