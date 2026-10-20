@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OCS 任务点为空 · 自动下一节
 // @namespace    https://local.ocs.helper
-// @version      3.13.0
+// @version      3.13.1
 // @description  当 OCS 提示「页面任务点数量为空! 请刷新重试!」时，自动把超星课程切换到下一节；一直跳到没有下一节为止。
 // @author       YG
 // @namespace    https://github.com/KoishiYU/chaoxing-auto-next
@@ -28,11 +28,12 @@
 	}
 
 	const TAG = '[自动下一节]';
-	const VERSION = '3.13.0';
+	const VERSION = '3.13.1';
 	const STORE_KEY = 'ocs-auto-next:cfg:v3';
 	const LAST_JUMP_KEY = 'ocs-auto-next:lastjump';
 	const PENDING_KEY = 'ocs-auto-next:pending';
 	const COUNT_KEY = 'ocs-auto-next:jumpcount';
+	const RESET_KEY = 'ocs-auto-next:count-reset-3.13.1';
 
 	/* ==========================================================
 	 * 1. 配置
@@ -1683,6 +1684,7 @@
 				<div class="row"><label>空节确认(s)</label><input type="number" id="inp-nw" min="3" max="120" step="1"></div>
 				<div class="btns">
 					<button class="btn primary" id="btn-jump">跳一节</button>
+					<button class="btn" id="btn-reset">清零</button>
 					<button class="btn" id="btn-diagnose">诊断</button>
 					<button class="btn" id="btn-probe">结构</button>
 					<button class="btn" id="btn-upload">上传结构</button>
@@ -1773,6 +1775,18 @@
 			rt.endReached = false;
 			rt.lastJumpAt = 0;
 			jumpOnce('手动');
+		});
+
+		ui.root.getElementById('btn-reset').addEventListener('click', () => {
+			rt.jumpCount = 0;
+			rt.failCount = 0;
+			try {
+				localStorage.removeItem(COUNT_KEY);
+				localStorage.removeItem(LAST_JUMP_KEY);
+				localStorage.setItem(RESET_KEY, '1');
+			} catch (e) {}
+			updatePanel();
+			log('跳节计数已清零，从当前节重新数', 'info');
 		});
 
 		ui.root.getElementById('btn-diagnose').addEventListener('click', () => diagnose());
@@ -2302,6 +2316,15 @@
 	 * ========================================================== */
 	function start() {
 		loadStoredLogs();
+		// 3.13.1 之前把「页面自己刷新」也计成跳节，历史计数虚高（127 次对第 97 节），
+		// 升级后一次性清零，之后每节只计一次真跳节。
+		try {
+			if (!localStorage.getItem(RESET_KEY)) {
+				localStorage.removeItem(COUNT_KEY);
+				localStorage.removeItem(LAST_JUMP_KEY);
+				localStorage.setItem(RESET_KEY, '1');
+			}
+		} catch (e) {}
 		try {
 			const c = parseInt(localStorage.getItem(COUNT_KEY) || '0', 10);
 			if (c > 0) rt.jumpCount = c;
