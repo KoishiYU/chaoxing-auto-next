@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OCS 任务点为空 · 自动下一节
 // @namespace    https://local.ocs.helper
-// @version      3.14.4
+// @version      3.14.5
 // @description  当 OCS 提示「页面任务点数量为空! 请刷新重试!」时，自动把超星课程切换到下一节；一直跳到没有下一节为止。
 // @author       YG
 // @namespace    https://github.com/KoishiYU/chaoxing-auto-next
@@ -28,7 +28,7 @@
 	}
 
 	const TAG = '[自动下一节]';
-	const VERSION = '3.14.4';
+	const VERSION = '3.14.5';
 	const STORE_KEY = 'ocs-auto-next:cfg:v3';
 	const LAST_JUMP_KEY = 'ocs-auto-next:lastjump';
 	const PENDING_KEY = 'ocs-auto-next:pending';
@@ -813,6 +813,11 @@
 	 * 其次是 .ans-job-finished 类，最后是旁边的「✓ 任务点已完成」文字。
 	 */
 	function jobStateOf(el) {
+		// 父层的 .ans-job-finished 是学完后动态加上的，最可靠，先看它。
+		// 实测（第 200 节）：aria-label 一直停在「任务点未完成」，但父层
+		// <div class="ans-attach-ct videoContainer ans-job-finished"> 早就加上了。
+		// 先看 aria 就会把学完的任务点判成没学 —— 于是无限重播、永远不跳。
+		if (jobFinishedByClass(el)) return true;
 		let s = el;
 		for (let i = 0; i < 3 && s; i++) {
 			let al = '';
@@ -820,14 +825,12 @@
 				al = String((s.getAttribute && s.getAttribute('aria-label')) || '');
 			} catch (e) {}
 			if (/任务点已完成/.test(al)) return true;
-			if (/任务点未完成/.test(al)) return false;
 			try {
 				s = s.parentElement;
 			} catch (e) {
 				break;
 			}
 		}
-		if (jobFinishedByClass(el)) return true;
 		if (jobFinishedByText(el)) return true;
 		return false;
 	}
@@ -1388,6 +1391,18 @@
 		// 到这里：媒体全完成 / 附件已停留 / 所有 tab 已走完 / 确认本节没有任务点
 		rt.tabsKey = '';
 		rt.tabsSeen = {};
+		// 最后一节没得跳：别白试三轮，直接收工
+		try {
+			const endInfo = readIds();
+			if (endInfo && endInfo.total > 0 && endInfo.activeIdx === endInfo.total - 1) {
+				rt.endReached = true;
+				rt.learnNote = '已到最后一节，全部完成';
+				log('已经是最后一节（' + endInfo.total + '/' + endInfo.total + '），自动跳节结束', 'success');
+				updatePanel();
+				return;
+			}
+		} catch (e) {}
+
 		rt.learnNote = '本节任务点已完成，准备跳下一节';
 		log(
 			'本节任务点完成（媒体 ' +
