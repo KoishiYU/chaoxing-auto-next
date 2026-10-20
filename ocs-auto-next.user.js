@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OCS 任务点为空 · 自动下一节
 // @namespace    https://local.ocs.helper
-// @version      3.13.1
+// @version      3.14.0
 // @description  当 OCS 提示「页面任务点数量为空! 请刷新重试!」时，自动把超星课程切换到下一节；一直跳到没有下一节为止。
 // @author       YG
 // @namespace    https://github.com/KoishiYU/chaoxing-auto-next
@@ -28,7 +28,7 @@
 	}
 
 	const TAG = '[自动下一节]';
-	const VERSION = '3.13.1';
+	const VERSION = '3.14.0';
 	const STORE_KEY = 'ocs-auto-next:cfg:v3';
 	const LAST_JUMP_KEY = 'ocs-auto-next:lastjump';
 	const PENDING_KEY = 'ocs-auto-next:pending';
@@ -96,6 +96,12 @@
 		/** 方案 B 用 */
 		lastDriveAt: 0,
 		lastDriveLogAt: 0,
+		/** 当前锁定的一个播放目标（按 src 认）+ 它上一次的位置，用来判「推不动」 */
+		mediaKey: '',
+		mediaAt: 0,
+		mediaCur: -1,
+		/** 推不动的媒体：{src: 时间戳}，2 分钟内不再碰它 */
+		deadMedia: {},
 		noMediaSince: 0,
 		mediaDoneAt: 0,
 		mediaInfo: { total: 0, done: 0 },
@@ -747,8 +753,7 @@
 		let total = 0;
 		let done = 0;
 		let preset = 0;
-		for (const it of mediaReport()) {
-			if (!isRealMedia(it.el)) continue;
+		for (const it of mediaList()) {
 			total++;
 			if (it.ended) {
 				done++;
@@ -1007,6 +1012,30 @@
 		return out;
 	}
 
+	/**
+	 * 去重后的媒体列表。
+	 *
+	 * 超星会给同一个视频塞两个 <video>：一个是真播放器（ready=4），一个是隐藏副本
+	 * （ready=0、cur 走自己的）。实测诊断里两行同 src：
+	 *   媒体#1 video cur=71 dur=114 ready=4
+	 *   媒体#3 video cur=37 dur=NaN ready=0   ← 同一个 65994da06bf3...
+	 * 不去重的话分母虚高（媒体 3/4 永远到不了 4/4），而且副本会把真播放器顶停。
+	 * 按 src 合并，保留「更有信息量」的那个。
+	 */
+	function mediaList() {
+		const byKey = new Map();
+		const score = function (x) {
+			return (x.ready > 0 ? 8 : 0) + (x.paused ? 0 : 4) + (x.cur > 0 ? 2 : 0) + (x.ended ? 16 : 0);
+		};
+		for (const it of mediaReport()) {
+			if (!isRealMedia(it.el)) continue;
+			it.key = it.srcFull;
+			const prev = byKey.get(it.key);
+			if (!prev || score(it) > score(prev)) byKey.set(it.key, it);
+		}
+		return Array.from(byKey.values());
+	}
+
 	/** 点播放器自己的播放按钮（超星 ananas / video.js，光 play() 往往推不动） */
 	function clickPlayerButton(v) {
 		let doc = null;
@@ -1039,47 +1068,125 @@
 		return false;
 	}
 
-	/** 启动/维持所有未完成媒体的播放 */
+	/**
+	 * 一页多个视频时，不要来回抢播放权。
+	 *
+	 * 旧逻辑每轮找「第一个没播完的」就 play()，于是：
+	 *   OCS 切到任务点②、① 变 paused → 下一轮我们又 play ①
+	 *   → 播放器单例把②顶停 → 再下一轮 play ② → 又顶停①
+	 * 几个视频集体在原处踏步，日志里就是「播几秒第一个、又去第二个」。
+	 *
+	 * 新规则：
+	 *   1. 已经有视频在播 → 只跟着它（调倍速/静音），绝不 play 别的
+	 *   2. 都没在播 → 先接上次锁定的目标，其次挑 cur>0 未完成的，最后才挑新的
+	 *   3. 锁定的目标 play 后 12 秒位置一动不动 → 判死，2 分钟内不再碰它
+	 */
 	function driveMedia() {
 		const rate = Number(cfg.rate) || 2;
-		let acted = false;
-		// 超星播放器是单例的：同时 play 两个 video，后一个会把前一个顶停，
-		// 结果两个都播不完（实测 23:12:02 与 23:12:06 两次诊断，正在播的那个一直在换）。
-		// 所以每轮只驱动「第一个还没播完的」，它播完了再轮到下一个。
 		const fin = finishedObjectIds();
-		const list = mediaReport().filter(function (it) {
-			return isRealMedia(it.el) && !it.ended && !srcIsFinished(it.srcFull, fin);
+		const list = mediaList().filter(function (it) {
+			return !it.ended && !srcIsFinished(it.srcFull, fin);
 		});
-		const target = list.find((it) => {
-			if (it.dur && isFinite(it.dur) && it.dur > 0 && it.dur - it.cur < 1.5) return false;
-			return true;
+		if (!list.length) return false;
+
+		const dead = rt.deadMedia || (rt.deadMedia = {});
+		const isDead = function (k) {
+			return !!dead[k] && now() - dead[k] < 120000;
+		};
+		const playable = function (it) {
+			return !(it.dur && isFinite(it.dur) && it.dur > 0 && it.dur - it.cur < 1.5);
+		};
+
+		let target = null;
+		let needPlay = false;
+
+		// ① 有在播的 —— 跟随，不抢
+		const playing = list.find(function (it) {
+			return !it.paused;
 		});
+		if (playing) {
+			target = playing;
+		} else {
+			// ② 都没播 —— 先看上次锁定的那个
+			if (rt.mediaKey && !isDead(rt.mediaKey)) {
+				const t = list.find(function (it) {
+					return it.key === rt.mediaKey;
+				});
+				if (t && playable(t)) target = t;
+			}
+			// ③ 没有就挑：已开始未完成的优先，全新的其次
+			if (!target) {
+				const pool = list.filter(function (it) {
+					return !isDead(it.key);
+				});
+				const src = pool.length ? pool : list;
+				target =
+					src.find(function (it) {
+						return it.cur > 0 && playable(it);
+					}) || src.find(playable) || null;
+			}
+			needPlay = !!target;
+		}
 		if (!target) return false;
+
+		// 换目标时重置「推不动」计时，同一目标位置有变化就刷新
+		if (target.key !== rt.mediaKey) {
+			rt.mediaKey = target.key;
+			rt.mediaAt = now();
+			rt.mediaCur = target.cur;
+		} else if (target.cur !== rt.mediaCur) {
+			rt.mediaCur = target.cur;
+			rt.mediaAt = now();
+		}
 
 		const v = target.el;
 		try {
-			if (v.playbackRate !== rate) v.playbackRate = rate;
-		} catch (e) {}
-		try {
 			v.muted = true; // 不静音浏览器不让自动播
 		} catch (e) {}
-		if (target.paused) {
+		try {
+			if (v.playbackRate !== rate) v.playbackRate = rate;
+		} catch (e) {}
+
+		if (needPlay) {
 			if (target.ready === 0) clickPlayerButton(v);
 			try {
 				const p = v.play();
-				if (p && p.catch) p.catch(() => {});
+				if (p && p.catch) p.catch(function () {});
 			} catch (e) {}
-			acted = true;
+			// 12 秒推不动 → 判死，换下一个，别把整节卡在它身上
+			if (now() - (rt.mediaAt || 0) > 12000 && Math.abs((target.cur || 0) - (rt.mediaCur || 0)) < 0.5) {
+				dead[target.key] = now();
+				rt.mediaKey = '';
+				log(
+					'媒体推不动，跳过：' + Math.round(target.cur || 0) + '/' + (isFinite(target.dur) ? Math.round(target.dur) : '?') + 's',
+					'info'
+				);
+			}
 		}
+
 		// 节流：每 30 秒最多记一次，别把日志刷爆
-		if (acted && now() - (rt.lastDriveLogAt || 0) > 30000) {
+		if (now() - (rt.lastDriveLogAt || 0) > 30000) {
 			rt.lastDriveLogAt = now();
 			log(
-				'驱动播放：' + Math.round(target.cur || 0) + '/' + (isFinite(target.dur) ? Math.round(target.dur) : '?') + 's（' + rate + 'x，静音）',
+				(needPlay ? '驱动播放：' : '跟随播放：') +
+					Math.round(target.cur || 0) +
+					'/' +
+					(isFinite(target.dur) ? Math.round(target.dur) : '?') +
+					's（' +
+					rate +
+					'x，静音）',
 				'info'
 			);
 		}
-		return acted;
+		return true;
+	}
+
+	/** 换节 / 换 tab 时清掉媒体锁定与判死记录，否则新页面的视频会被旧 key 挡住 */
+	function resetMediaState() {
+		rt.mediaKey = '';
+		rt.mediaAt = 0;
+		rt.mediaCur = -1;
+		rt.deadMedia = {};
 	}
 
 	/** 方案 B 主循环：任务点没完成就自己放完，完成后再跳 */
@@ -1201,6 +1308,7 @@
 				rt.attachRound = 0;
 				rt.attachPassed = false;
 				rt.noMediaSince = 0;
+				resetMediaState();
 				return;
 			}
 		}
@@ -1514,6 +1622,7 @@
 		} finally {
 			rt.busy = false;
 			rt.lastJumpAt = now();
+			resetMediaState();
 			updatePanel();
 		}
 	}
@@ -2106,6 +2215,18 @@
 				);
 				if (it.src) log('        src=' + it.src, 'info');
 			});
+			const uniq = mediaList();
+			if (uniq.length !== rep.filter(function (x) { return isRealMedia(x.el); }).length) {
+				log(
+					'        去重后：' + uniq.length + ' 个不同视频（同 src 的隐藏副本已合并）',
+					'info'
+				);
+			}
+			log(
+				'        当前锁定：' + (rt.mediaKey ? rt.mediaKey.slice(-12) : '无') +
+					'；判死：' + Object.keys(rt.deadMedia || {}).length + ' 个',
+				'info'
+			);
 		}
 		// 任务点：区分视频型与附件/文档型
 		const jobs = jobPoints();
