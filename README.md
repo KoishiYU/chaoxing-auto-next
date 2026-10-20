@@ -2,7 +2,7 @@
 
 OCS 报「页面任务点数量为空」时，自动切到下一节。
 
-![version](https://img.shields.io/badge/version-3.13.0-blue)
+![version](https://img.shields.io/badge/version-3.13.1-blue)
 ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ## 问题
@@ -31,6 +31,8 @@ top.document.querySelectorAll('[onclick^="getTeacherAjax"]')
 
 ## 安装
 
+**完全没用过用户脚本？看 [安装指引](安装指引.md)** —— 从确认浏览器、装脚本管理器到排查问题的完整步骤，面向零基础。
+
 1. 装脚本管理器 —— [ScriptCat](https://scriptcat.org/) 或 [Tampermonkey](https://www.tampermonkey.net/)
    （OCS Desktop 内置已带，无需安装）
 2. 把 `ocs-auto-next.user.js` 拖进浏览器窗口 → 点「安装」
@@ -47,7 +49,7 @@ top.document.querySelectorAll('[onclick^="getTeacherAjax"]')
 | 附件停留 | 10 | 文档/附件任务点点开后停留多少秒 |
 | 空节确认 | 12 | 没找到任何任务点时等多久才判「这节真没东西」 |
 
-按钮：`跳一节` 手动跳一次 · `诊断` 输出页面结构与媒体状态 · `结构` 探测目录 DOM。
+按钮：`跳一节` 手动跳一次 · `清零` 计数归零 · `诊断` 输出页面结构与媒体状态 · `结构` 探测目录 DOM。
 
 ## 工作原理
 
