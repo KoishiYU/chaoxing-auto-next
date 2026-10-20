@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OCS 任务点为空 · 自动下一节
 // @namespace    https://local.ocs.helper
-// @version      3.14.0
+// @version      3.14.1
 // @description  当 OCS 提示「页面任务点数量为空! 请刷新重试!」时，自动把超星课程切换到下一节；一直跳到没有下一节为止。
 // @author       YG
 // @namespace    https://github.com/KoishiYU/chaoxing-auto-next
@@ -28,7 +28,7 @@
 	}
 
 	const TAG = '[自动下一节]';
-	const VERSION = '3.14.0';
+	const VERSION = '3.14.1';
 	const STORE_KEY = 'ocs-auto-next:cfg:v3';
 	const LAST_JUMP_KEY = 'ocs-auto-next:lastjump';
 	const PENDING_KEY = 'ocs-auto-next:pending';
@@ -1189,9 +1189,14 @@
 		rt.deadMedia = {};
 	}
 
-	/** 方案 B 主循环：任务点没完成就自己放完，完成后再跳 */
+	/**
+	 * 方案 B 主循环：
+	 *   - cfg.learn（自己放视频）开着   → 自己 play() + 判断完成 + 跳节
+	 *   - cfg.learn 关掉            → 不碰播放（让 OCS 放），但仍然判断“这节学完了没”，完成了就跳
+	 * 关掉 learn 不等于关掉整个循环，否则「让 OCS 管播放、脚本管跳节」这个组合根本无法实现。
+	 */
 	function tickLearn() {
-		if (!cfg.enabled || !cfg.learn || rt.busy) return;
+		if (!cfg.enabled || rt.busy) return;
 		if (rt.endReached) return;
 		if (now() - rt.lastJumpAt < 15000) return; // 刚跳完，等页面渲染
 
@@ -1207,9 +1212,24 @@
 				m.done +
 				'/' +
 				m.total +
-				' 已完成，正在推进' +
+				' 已完成，' +
+				(cfg.learn ? '正在推进' : '等 OCS 播放') +
 				(m.preset ? '（跳过 ' + m.preset + ' 个已学）' : '');
-			if (now() - rt.lastDriveAt > 2500) {
+			// OCS 在播 / 我们在播都行，但若 3 分钟一格不动，就是卡住了，提醒人看一眼睛
+			let sum = 0;
+			for (const it of mediaReport()) sum += it.cur || 0;
+			if (Math.abs(sum - (rt.mediaSum || 0)) > 0.5) {
+				rt.mediaSum = sum;
+				rt.stallAt = now();
+				rt.stallWarned = false;
+			} else if (now() - (rt.stallAt || now()) > 180000 && !rt.stallWarned) {
+				rt.stallWarned = true;
+				log(
+					'媒体 3 分钟没有任何进度' + (cfg.learn ? '（脚本推不动）' : '（OCS 似乎没在放）') + '，点「诊断」看详情',
+					'warn'
+				);
+			}
+			if (cfg.learn && now() - rt.lastDriveAt > 2500) {
 				rt.lastDriveAt = now();
 				driveMedia();
 			}
@@ -1786,7 +1806,7 @@
 				<div class="status" id="status">等待学习页…</div>
 				<div class="lastjump" id="lastjump"></div>
 				<div class="row"><label>启用</label><div class="sw on" id="sw-enable"></div></div>
-				<div class="row"><label>自己放视频(方案B)</label><div class="sw on" id="sw-learn"></div></div>
+				<div class="row"><label>自己驱动播放</label><div class="sw on" id="sw-learn"></div></div>
 				<div class="row"><label>倍速</label><input type="number" id="inp-rate" min="1" max="16" step="0.5"></div>
 				<div class="row"><label>间隔(ms)</label><input type="number" id="inp-cd" min="1000" max="60000" step="500"></div>
 				<div class="row"><label>附件停留(s)</label><input type="number" id="inp-aw" min="5" max="600" step="5"></div>
@@ -1856,7 +1876,7 @@
 			cfg.learn = !cfg.learn;
 			saveCfg();
 			updatePanel();
-			log(cfg.learn ? '方案B已开：自己放视频，放完才跳' : '方案B已关：只跳节，不管任务点', 'info');
+			log(cfg.learn ? '自己驱动播放：脚本 play + 判断完成 + 跳节' : '不碰播放：由 OCS 放，脚本只判断完成 + 跳节', 'info');
 		});
 
 		ui.inpRate.addEventListener('change', () => {
