@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OCS 任务点为空 · 自动下一节
 // @namespace    https://local.ocs.helper
-// @version      3.8.2
+// @version      3.13.0
 // @description  当 OCS 提示「页面任务点数量为空! 请刷新重试!」时，自动把超星课程切换到下一节；一直跳到没有下一节为止。
 // @author       YG
 // @namespace    https://github.com/KoishiYU/chaoxing-auto-next
@@ -28,7 +28,7 @@
 	}
 
 	const TAG = '[自动下一节]';
-	const VERSION = '3.8.2';
+	const VERSION = '3.13.0';
 	const STORE_KEY = 'ocs-auto-next:cfg:v3';
 	const LAST_JUMP_KEY = 'ocs-auto-next:lastjump';
 	const PENDING_KEY = 'ocs-auto-next:pending';
@@ -49,6 +49,11 @@
 		learn: true,
 		/** 自己驱动播放时用的倍速 */
 		rate: 2,
+		/** 附件/文档型任务点：点开后停留多久（毫秒）才允许跳节 */
+		attachWait: 10000,
+		noMediaWait: 12000,
+		/** 停留到上限仍显示未完成时，再多等几轮 */
+		attachRounds: 1,
 		/** 折叠状态 */
 		minimized: false
 	};
@@ -62,6 +67,8 @@
 			delete saved.maxJumps;
 			delete saved.strategy;
 			delete saved.useStateDetect;
+			// 旧默认值 90s 对小章节（基本内涵这类纯文档 tab）太久，一次性降到 10s
+			if (Number(saved.attachWait) === 90000) saved.attachWait = DEFAULTS.attachWait;
 			return Object.assign(base, saved || {});
 		} catch (e) {
 			return base;
@@ -91,6 +98,18 @@
 		noMediaSince: 0,
 		mediaDoneAt: 0,
 		mediaInfo: { total: 0, done: 0 },
+		/** 附件任务点：当前停留的是哪一个 / 从何时开始 / 已重试几轮 */
+		attachKey: '',
+		attachSince: 0,
+		attachRound: 0,
+		attachPassed: false,
+		attachInfo: { pending: 0 },
+		/** 本节是否曾看到过任务点（判断渲染延迟用） */
+		sawJobs: false,
+		/** 本节已经切过的 tab 下标：{0:true, 1:true} */
+		tabsSeen: {},
+		/** tabsSeen 对应的 localStorage key（换节时变） */
+		tabsKey: '',
 		learnNote: ''
 	};
 
@@ -600,9 +619,133 @@
 		}
 	}
 
+	/* ---------- 一节内的 tab（1 典型案例 / 2 基本内涵）---------- */
+	/** 读 #prev_tab 里的分组 tab：每个 tab 是独立知识点，全都得学 */
+	function tabState(doc) {
+		if (!doc) return null;
+		let ul = null;
+		try {
+			ul = doc.querySelector('#prev_tab .prev_ul') || doc.querySelector('.prev_ul');
+		} catch (e) {}
+		if (!ul) return null;
+		let items = [];
+		try {
+			items = Array.from(ul.querySelectorAll('li'));
+		} catch (e) {}
+		if (items.length < 2) return null;
+		const isOn = function (s) {
+			return /(^|[\s_-])(active|current|cur|selected|on)([\s_-]|$)/i.test(String(s || ''));
+		};
+		let idx = -1;
+		items.forEach(function (li, i) {
+			let c = '';
+			try {
+				c = String(li.className || '');
+			} catch (e) {}
+			if (isOn(c)) idx = i;
+		});
+		if (idx < 0) {
+			items.forEach(function (li, i) {
+				let a = null;
+				try {
+					a = li.querySelector('a');
+				} catch (e) {}
+				if (a && isOn(a.className)) idx = i;
+			});
+		}
+		return { ul: ul, items: items, idx: idx, total: items.length, keys: items.map(tabKey) };
+	}
+
+	/** tab 的稳定标识：优先 id(dct1/dct2)，其次 cardid，最后下标 */
+	function tabKey(li, i) {
+		let k = '';
+		try {
+			k = String(li.id || li.getAttribute('cardid') || '');
+		} catch (e) {}
+		return k || 'i' + i;
+	}
+
+	function tabLabel(li) {
+		let t = '';
+		try {
+			t = String((li && li.textContent) || '');
+		} catch (e) {}
+		return t.replace(/\s+/g, ' ').trim().slice(0, 24);
+	}
+
+	function switchTab(tab, i) {
+		const li = tab && tab.items && tab.items[i];
+		if (!li) return false;
+		// 优先直接调换页函数：onclick="changeDisplayContent(N,2,chapterId,courseId,clazzId,'')"
+		let oc = '';
+		try {
+			oc = String(li.getAttribute('onclick') || '');
+		} catch (e) {}
+		const m = oc.match(/changeDisplayContent\(([^)]*)\)/);
+		if (m) {
+			try {
+				const own = li.ownerDocument && li.ownerDocument.defaultView;
+				const args = m[1].split(',').map(function (a) {
+					a = a.trim();
+					return /^['"]/.test(a) ? a.replace(/^['"]|['"]$/g, '') : Number(a);
+				});
+				const fns = [own, window, window.top];
+				for (let k = 0; k < fns.length; k++) {
+					try {
+						if (fns[k] && typeof fns[k].changeDisplayContent === 'function') {
+							fns[k].changeDisplayContent.apply(fns[k], args);
+							return true;
+						}
+					} catch (e) {}
+				}
+			} catch (e) {}
+		}
+		let target = li;
+		try {
+			target = li.querySelector('a') || li;
+		} catch (e) {}
+		try {
+			target.click();
+			return true;
+		} catch (e) {
+			return false;
+		}
+	}
+
+	/**
+	 * 本节 tab 的已学记录持久化。整页刷新会把 JS 上下文连同 rt 一起清掉，
+	 * 不存 localStorage 就会反复切同一个 tab、反复点开同一个附件。
+	 * key 用 courseId|activeIdx（activeIdx 是节在目录里的下标，能区分同章的多个节）。
+	 */
+	function tabsKeyOf() {
+		const info = readIds();
+		if (!info) return '';
+		return 'ocs-auto-next:tabs:' + info.courseId + '|' + info.activeIdx;
+	}
+
+	function syncTabsKey() {
+		const k = tabsKeyOf();
+		if (!k || rt.tabsKey === k) return;
+		rt.tabsKey = k;
+		try {
+			rt.tabsSeen = JSON.parse(localStorage.getItem(k) || '{}') || {};
+		} catch (e) {
+			rt.tabsSeen = {};
+		}
+	}
+
+	function saveTabsSeen() {
+		if (!rt.tabsKey) return;
+		try {
+			localStorage.setItem(rt.tabsKey, JSON.stringify(rt.tabsSeen || {}));
+		} catch (e) {}
+	}
+
 	function mediaDone() {
+		const fin = finishedObjectIds();
 		let total = 0;
 		let done = 0;
+		let preset = 0;
 		for (const it of mediaReport()) {
 			if (!isRealMedia(it.el)) continue;
 			total++;
@@ -610,10 +753,227 @@
 				done++;
 				continue;
 			}
+			// 已经学过的视频：加载后 currentTime 从头开始，但任务点标着"已完成"，不该重放
+			if (srcIsFinished(it.srcFull, fin)) {
+				done++;
+				preset++;
+				continue;
+			}
 			const dur = it.dur;
 			if (dur && isFinite(dur) && dur > 0 && dur - it.cur < 1.5) done++;
 		}
-		return { total: total, done: done };
+		return { total: total, done: done, preset: preset };
+	}
+
+	/* ---------- 附件 / 文档型任务点 ---------- */
+
+	/**
+	 * 超星把每个任务点标成 .ans-job-icon，已完成的再加 .ans-job-finished。
+	 * 视频类带 .ans-job-video / .ans-job-audio，其余（文档、附件、阅读材料）就是要
+	 * "打开并停留"才会被记录的那种。
+	 */
+	function jobPoints() {
+		const out = [];
+		for (const d of allDocs()) {
+			let els = [];
+			try {
+				els = Array.from(d.querySelectorAll('.ans-job-icon'));
+			} catch (e) {}
+			for (const el of els) {
+				let cls = '';
+				try {
+					cls = String(el.className || '');
+				} catch (e) {}
+				let pcls = '';
+				try {
+					pcls = el.parentElement ? String(el.parentElement.className || '') : '';
+				} catch (e) {}
+				out.push({
+					el: el,
+					cls: cls,
+					parentCls: pcls,
+					finished: jobStateOf(el),
+					media: /ans-job-(video|audio)/i.test(cls)
+				});
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * 任务点状态。最可靠的是站点自己写的 aria-label：
+	 *   <div class="ans-job-icon ans-job-video" aria-label="任务点未完成">
+	 *   <div class="ans-job-icon ans-job-video" aria-label="任务点已完成">
+	 * 其次是 .ans-job-finished 类，最后是旁边的「✓ 任务点已完成」文字。
+	 */
+	function jobStateOf(el) {
+		let s = el;
+		for (let i = 0; i < 3 && s; i++) {
+			let al = '';
+			try {
+				al = String((s.getAttribute && s.getAttribute('aria-label')) || '');
+			} catch (e) {}
+			if (/任务点已完成/.test(al)) return true;
+			if (/任务点未完成/.test(al)) return false;
+			try {
+				s = s.parentElement;
+			} catch (e) {
+				break;
+			}
+		}
+		if (jobFinishedByClass(el)) return true;
+		if (jobFinishedByText(el)) return true;
+		return false;
+	}
+
+	/**
+	 * 收集"已完成"任务点对应的 objectid，用来把 video 和它所属的任务点对上。
+	 * 站点结构：
+	 *   <div class="ans-attach-ct videoContainer">
+	 *     <div class="ans-job-icon" aria-label="任务点已完成">
+	 *     <iframe class="ans-attach-online ans-insertvideo-online"
+	 *             data='{"objectid":"75962f4868ba0d499faac9b371087fb3",...}'>
+	 * 而 video 的 currentSrc 里就带着同一个 objectid。
+	 */
+	function finishedObjectIds() {
+		const ids = {};
+		for (const d of allDocs()) {
+			let ifs = [];
+			try {
+				ifs = Array.from(d.querySelectorAll('iframe[data]'));
+			} catch (e) {
+				continue;
+			}
+			for (const f of ifs) {
+				let raw = '';
+				try {
+					raw = String(f.getAttribute('data') || '');
+				} catch (e) {}
+				const m = raw.match(/"objectid"\s*:\s*"([0-9a-zA-Z]+)"/);
+				if (!m) continue;
+				let ctn = null;
+				try {
+					ctn = f.parentElement;
+				} catch (e) {}
+				if (!ctn) continue;
+				let icon = null;
+				try {
+					icon = ctn.querySelector('.ans-job-icon');
+				} catch (e) {}
+				if (!icon) continue;
+				if (jobStateOf(icon)) ids[m[1]] = true;
+			}
+		}
+		return ids;
+	}
+
+	/** 这个视频地址是不是属于一个已完成的任务点 */
+	function srcIsFinished(src, ids) {
+		const s = String(src || '');
+		if (!s || !ids) return false;
+		for (const id in ids) {
+			if (id && s.indexOf(id) >= 0) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * 完成标记不在 .ans-job-icon 身上，而在它的父层 .ans-job-finished 上：
+	 *   <div class="ans-attach-ct ans-job-finished">
+	 *     <div class="ans-job-icon"></div>
+	 *     <iframe src="/ananas/modules/pdf/index.html" ...>
+	 *   </div>
+	 */
+	function jobFinishedByClass(el) {
+		let s = el;
+		for (let i = 0; i < 3 && s; i++) {
+			let cls = '';
+			try {
+				cls = String(s.className || '');
+			} catch (e) {}
+			if (/ans-job-finished/i.test(cls)) return true;
+			try {
+				s = s.parentElement;
+			} catch (e) {
+				break;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * 这个皮肤的 .ans-job-icon 不带状态类，只用旁边一行绿字「✓ 任务点已完成」
+	 * 表示完成，所以往上找 3 层看文本。
+	 */
+	function jobFinishedByText(el) {
+		let scope = null;
+		try {
+			scope = el.parentElement;
+		} catch (e) {
+			return false;
+		}
+		for (let i = 0; i < 3 && scope; i++) {
+			let t = '';
+			try {
+				t = String(scope.textContent || '');
+			} catch (e) {}
+			if (/任务点已完成/.test(t)) return true;
+			if (/任务点未完成|去完成/.test(t)) return false;
+			try {
+				scope = scope.parentElement;
+			} catch (e) {
+				break;
+			}
+		}
+		return false;
+	}
+
+	/** 未完成的非媒体任务点（附件查阅 / 文档阅读） */
+	function pendingAttachJobs() {
+		return jobPoints().filter(function (j) {
+			return !j.finished && !j.media;
+		});
+	}
+
+	function attachKeyOf(j) {
+		let t = '';
+		try {
+			t = String((j.el.parentElement && j.el.parentElement.textContent) || '')
+				.replace(/\s+/g, ' ')
+				.trim()
+				.slice(0, 60);
+		} catch (e) {}
+		return j.cls + '|' + t;
+	}
+
+	/** 把附件/文档任务点点开：先点图标本身，再找同一张卡片里的链接或内嵌 iframe */
+	function openJobPoint(j) {
+		let ok = false;
+		try {
+			j.el.click();
+			ok = true;
+		} catch (e) {}
+		let scope = null;
+		try {
+			scope = j.el.closest('.ans-job-wrap, .task-condition, .ans-attach-ct, li, .card') || j.el.parentElement;
+		} catch (e) {}
+		if (scope) {
+			let cand = null;
+			try {
+				cand = scope.querySelector('a[href]:not([href^="javascript:"]), [onclick], iframe, .ans-attach');
+			} catch (e) {}
+			if (cand) {
+				try {
+					if (String(cand.tagName).toUpperCase() === 'IFRAME') {
+						cand.focus();
+					} else {
+						cand.click();
+					}
+					ok = true;
+				} catch (e) {}
+			}
+		}
+		return ok;
 	}
 
 	/** 采集所有 media 元素的实时状态 */
@@ -636,6 +996,7 @@
 						ready: v.readyState,
 						muted: v.muted,
 						src: String(v.currentSrc || v.src || '').slice(0, 70),
+						srcFull: String(v.currentSrc || v.src || ''),
 						err: v.error ? v.error.code : 0,
 						pausedByErr: false
 					});
@@ -684,7 +1045,10 @@
 		// 超星播放器是单例的：同时 play 两个 video，后一个会把前一个顶停，
 		// 结果两个都播不完（实测 23:12:02 与 23:12:06 两次诊断，正在播的那个一直在换）。
 		// 所以每轮只驱动「第一个还没播完的」，它播完了再轮到下一个。
-		const list = mediaReport().filter((it) => isRealMedia(it.el) && !it.ended);
+		const fin = finishedObjectIds();
+		const list = mediaReport().filter(function (it) {
+			return isRealMedia(it.el) && !it.ended && !srcIsFinished(it.srcFull, fin);
+		});
 		const target = list.find((it) => {
 			if (it.dur && isFinite(it.dur) && it.dur > 0 && it.dur - it.cur < 1.5) return false;
 			return true;
@@ -730,7 +1094,13 @@
 
 		// 有未完成的媒体 → 驱动播放，继续等
 		if (m.total > 0 && m.done < m.total) {
-			rt.learnNote = '媒体 ' + m.done + '/' + m.total + ' 已完成，正在推进';
+			rt.learnNote =
+				'媒体 ' +
+				m.done +
+				'/' +
+				m.total +
+				' 已完成，正在推进' +
+				(m.preset ? '（跳过 ' + m.preset + ' 个已学）' : '');
 			if (now() - rt.lastDriveAt > 2500) {
 				rt.lastDriveAt = now();
 				driveMedia();
@@ -738,26 +1108,117 @@
 			return;
 		}
 
-		// 没有媒体：可能是纯文档/测验节，也可能是 video 还没渲染出来，给它 20 秒
-		if (m.total === 0) {
-			if (!rt.noMediaSince) {
-				rt.noMediaSince = now();
-				rt.learnNote = '本节暂未发现媒体，等 20 秒确认';
+		// 附件/文档型任务点：没有视频，但必须打开并停留够时间才算完成
+		const jobs = jobPoints();
+		if (jobs.length) rt.sawJobs = true;
+		const attach = jobs.filter(function (j) {
+			return !j.finished && !j.media;
+		});
+		rt.attachInfo = { pending: attach.length };
+		if (attach.length) {
+			const j = attach[0];
+			const key = attachKeyOf(j);
+			if (rt.attachKey !== key) {
+				rt.attachKey = key;
+				rt.attachSince = now();
+				rt.attachRound = 0;
+				rt.attachPassed = false;
+				rt.noMediaSince = 0;
+				openJobPoint(j);
+				log(
+					'发现 ' +
+						attach.length +
+						' 个未完成的附件/文档任务点，已点开，停留 ' +
+						Math.round(cfg.attachWait / 1000) +
+						' 秒',
+					'warn'
+				);
+			}
+			const waited = now() - (rt.attachSince || now());
+			if (waited < cfg.attachWait) {
+				rt.learnNote =
+					'附件任务点查阅中 ' +
+					Math.ceil((cfg.attachWait - waited) / 1000) +
+					's（还剩 ' +
+					attach.length +
+					' 个未完成）';
 				return;
 			}
-			if (now() - rt.noMediaSince < 20000) {
-				rt.learnNote = '本节暂未发现媒体，确认中 ' + Math.ceil((20000 - (now() - rt.noMediaSince)) / 1000) + 's';
+			if ((rt.attachRound || 0) < cfg.attachRounds) {
+				rt.attachRound = (rt.attachRound || 0) + 1;
+				rt.attachSince = now();
+				openJobPoint(j);
+				log('附件任务点仍未标记完成，再停留一轮（' + rt.attachRound + '/' + cfg.attachRounds + '）', 'warn');
+				rt.learnNote = '附件任务点重试停留 ' + rt.attachRound + '/' + cfg.attachRounds;
+				return;
+			}
+			log('附件任务点停留到上限仍显示未完成，放行跳节', 'warn');
+			rt.attachPassed = true;
+			rt.attachKey = '';
+			rt.attachRound = 0;
+		} else {
+			rt.attachKey = '';
+			rt.attachRound = 0;
+		}
+
+		// 既没媒体也没附件任务点：可能是纯文字节，也可能是任务点还没渲染出来
+		if (m.total === 0 && !rt.attachPassed) {
+			// 任务点在 iframe 里懒加载，实际要到十几秒后才出现，20 秒太短会误判成"无可学内容"
+			const waitMs = Number(cfg.noMediaWait) || 12000;
+			if (!rt.noMediaSince) {
+				rt.noMediaSince = now();
+				rt.learnNote = '本节暂未发现可学任务点，等 ' + Math.round(waitMs / 1000) + ' 秒确认';
+				return;
+			}
+			if (now() - rt.noMediaSince < waitMs) {
+				rt.learnNote =
+					'本节暂未发现可学任务点，确认中 ' + Math.ceil((waitMs - (now() - rt.noMediaSince)) / 1000) + 's';
 				return;
 			}
 		}
 
-		// 到这里：媒体全完成，或确认本节没有媒体
+		// 本节可能有多个 tab（1 典型案例 / 2 基本内涵），每个 tab 是独立知识点
+		const tab = tabState(studyDoc());
+		if (tab) {
+			syncTabsKey();
+			if (tab.idx >= 0) rt.tabsSeen[tab.keys[tab.idx]] = true;
+			let nextI = -1;
+			for (let i = 0; i < tab.total; i++) {
+				if (!rt.tabsSeen[tab.keys[i]]) {
+					nextI = i;
+					break;
+				}
+			}
+			if (nextI >= 0 && switchTab(tab, nextI)) {
+				rt.tabsSeen[tab.keys[nextI]] = true;
+				saveTabsSeen();
+				log('本节还有未学的 tab，切到第 ' + (nextI + 1) + '/' + tab.total + ' 个：' + tabLabel(tab.items[nextI]), 'warn');
+				rt.learnNote = '切换到 tab ' + (nextI + 1) + '/' + tab.total;
+				// 新 tab 的任务点从头计时
+				rt.attachKey = '';
+				rt.attachSince = 0;
+				rt.attachRound = 0;
+				rt.attachPassed = false;
+				rt.noMediaSince = 0;
+				return;
+			}
+		}
+
+		// 到这里：媒体全完成 / 附件已停留 / 所有 tab 已走完 / 确认本节没有任务点
+		rt.tabsKey = '';
+		rt.tabsSeen = {};
 		rt.learnNote = '本节任务点已完成，准备跳下一节';
 		log(
-			'本节任务点完成（媒体 ' + m.done + '/' + m.total + '），跳下一节',
+			'本节任务点完成（媒体 ' +
+				m.done +
+				'/' +
+				m.total +
+				(attach.length ? '，附件停留 ' + Math.round(cfg.attachWait / 1000) + 's' : '') +
+				'），跳下一节',
 			'success'
 		);
 		rt.noMediaSince = 0;
+		rt.attachPassed = false;
 		jumpOnce('本节任务点已完成');
 	}
 
@@ -954,6 +1415,17 @@
 					rt.jumpCount++;
 					return true;
 				}
+				// 页面可能还在加载：先不累计失败，超过 90 秒才算真失败
+				if (!rt.noPageSince) rt.noPageSince = now();
+				const waitedNoPage = now() - rt.noPageSince;
+				if (waitedNoPage < 90000) {
+					if (now() - (rt.lastNoPageLogAt || 0) > 20000) {
+						rt.lastNoPageLogAt = now();
+						log('还定位不到学习页（#curChapterId），等页面加载…已等 ' + Math.round(waitedNoPage / 1000) + 's', 'warn');
+					}
+					return false;
+				}
+				rt.noPageSince = 0;
 				rt.failCount++;
 				log('跳节失败：找不到学习页（#curChapterId）', 'error');
 				if (rt.failCount >= cfg.maxFail) {
@@ -962,6 +1434,7 @@
 				}
 				return false;
 			}
+			rt.noPageSince = 0;
 
 			const before = info;
 			const fromText =
@@ -1206,10 +1679,13 @@
 				<div class="row"><label>自己放视频(方案B)</label><div class="sw on" id="sw-learn"></div></div>
 				<div class="row"><label>倍速</label><input type="number" id="inp-rate" min="1" max="16" step="0.5"></div>
 				<div class="row"><label>间隔(ms)</label><input type="number" id="inp-cd" min="1000" max="60000" step="500"></div>
+				<div class="row"><label>附件停留(s)</label><input type="number" id="inp-aw" min="5" max="600" step="5"></div>
+				<div class="row"><label>空节确认(s)</label><input type="number" id="inp-nw" min="3" max="120" step="1"></div>
 				<div class="btns">
 					<button class="btn primary" id="btn-jump">跳一节</button>
 					<button class="btn" id="btn-diagnose">诊断</button>
 					<button class="btn" id="btn-probe">结构</button>
+					<button class="btn" id="btn-upload">上传结构</button>
 				</div>
 				<div class="logbox" id="logbox"></div>
 			</div>
@@ -1236,7 +1712,9 @@
 			swEnable: root.getElementById('sw-enable'),
 			swLearn: root.getElementById('sw-learn'),
 			inpRate: root.getElementById('inp-rate'),
-			inpCd: root.getElementById('inp-cd')
+			inpCd: root.getElementById('inp-cd'),
+			inpAw: root.getElementById('inp-aw'),
+			inpNw: root.getElementById('inp-nw')
 		};
 
 		ui.root.getElementById('min').addEventListener('click', () => setMinimized(true));
@@ -1277,6 +1755,20 @@
 			saveCfg();
 		});
 
+		ui.inpAw.addEventListener('change', () => {
+			const v = parseInt(ui.inpAw.value, 10);
+			cfg.attachWait = !isNaN(v) && v >= 5 && v <= 600 ? v * 1000 : 10000;
+			ui.inpAw.value = Math.round(cfg.attachWait / 1000);
+			saveCfg();
+		});
+
+		ui.inpNw.addEventListener('change', () => {
+			const v = parseInt(ui.inpNw.value, 10);
+			cfg.noMediaWait = !isNaN(v) && v >= 3 && v <= 120 ? v * 1000 : 12000;
+			ui.inpNw.value = Math.round(cfg.noMediaWait / 1000);
+			saveCfg();
+		});
+
 		ui.root.getElementById('btn-jump').addEventListener('click', () => {
 			rt.endReached = false;
 			rt.lastJumpAt = 0;
@@ -1284,6 +1776,7 @@
 		});
 
 		ui.root.getElementById('btn-diagnose').addEventListener('click', () => diagnose());
+		ui.root.getElementById('btn-upload').addEventListener('click', () => sendProbe());
 		ui.root.getElementById('btn-probe').addEventListener('click', () => {
 			try {
 				showProbe();
@@ -1314,6 +1807,9 @@
 		const ae = (ui.root && ui.root.activeElement) || document.activeElement;
 		if (ae !== ui.inpCd) ui.inpCd.value = cfg.cooldown;
 		if (ae !== ui.inpRate) ui.inpRate.value = cfg.rate;
+		if (ae !== ui.inpAw) ui.inpAw.value = Math.round(cfg.attachWait / 1000);
+		if (Number(ui.inpNw.value) !== Math.round((Number(cfg.noMediaWait) || 12000) / 1000))
+			ui.inpNw.value = Math.round((Number(cfg.noMediaWait) || 12000) / 1000);
 
 		let s = '';
 		if (!en) {
@@ -1368,6 +1864,163 @@
 	/* ==========================================================
 	 * 9. 诊断 / 结构探针
 	 * ========================================================== */
+	/* ---------- 结构上报：把真实 DOM 传给本地服务，供离线分析 ---------- */
+	function collectProbe() {
+		const out = {
+			version: VERSION,
+			url: String(location.href),
+			time: new Date().toISOString(),
+			docs: [],
+			jobs: [],
+			jobTexts: [],
+			media: [],
+			ids: null
+		};
+		const squash = function (s, n) {
+			return String(s || '')
+				.replace(/\s+/g, ' ')
+				.trim()
+				.slice(0, n || 600);
+		};
+		const docs = allDocs();
+		docs.forEach(function (d, i) {
+			let href = '?';
+			let title = '';
+			try {
+				href = String(d.location.href);
+			} catch (e) {}
+			try {
+				title = String(d.title || '');
+			} catch (e) {}
+			out.docs.push({ i: i, href: href.slice(0, 300), title: title.slice(0, 80) });
+		});
+		docs.forEach(function (d, di) {
+			let icons = [];
+			try {
+				icons = Array.from(d.querySelectorAll('.ans-job-icon'));
+			} catch (e) {}
+			icons.forEach(function (el, k) {
+				const chain = [];
+				let s = el;
+				for (let up = 0; up < 6 && s; up++) {
+					let html = '';
+					try {
+						html = squash(s.outerHTML, 900);
+					} catch (e) {}
+					chain.push({
+						level: up,
+						tag: String(s.tagName || ''),
+						cls: squash(s.className, 200),
+						text: squash(s.textContent, 200),
+						html: html
+					});
+					try {
+						s = s.parentElement;
+					} catch (e) {
+						break;
+					}
+				}
+				out.jobs.push({ doc: di, index: k, cls: squash(el.className, 200), chain: chain });
+			});
+
+			let all = [];
+			try {
+				all = Array.from(d.querySelectorAll('body *'));
+			} catch (e) {}
+			for (const el of all) {
+				let t = '';
+				try {
+					t = String(el.textContent || '');
+				} catch (e) {}
+				if (t.length > 200) continue;
+				if (!/任务点|去完成/.test(t)) continue;
+				let html = '';
+				try {
+					html = squash(el.outerHTML, 700);
+				} catch (e) {}
+				out.jobTexts.push({
+					doc: di,
+					tag: String(el.tagName || ''),
+					cls: squash(el.className, 120),
+					id: String(el.id || ''),
+					text: squash(t, 160),
+					html: html
+				});
+				if (out.jobTexts.length > 60) break;
+			}
+		});
+		for (const it of mediaReport()) {
+			out.media.push({
+				tag: it.tag,
+				paused: it.paused,
+				dur: isFinite(it.dur) ? Math.round(it.dur) : null,
+				cur: Math.round(it.cur || 0),
+				ready: it.ready,
+				err: it.err,
+				src: it.src
+			});
+		}
+		try {
+			const info = readIds();
+			if (info) {
+				out.ids = {
+					chapterId: info.chapterId,
+					courseId: info.courseId,
+					clazzId: info.clazzId,
+					activeIdx: info.activeIdx,
+					activeLabel: info.activeLabel,
+					total: info.total,
+					tabCount: info.tabCount
+				};
+			}
+		} catch (e) {}
+		try {
+			const sdoc = studyDoc();
+			const tab = tabState(sdoc);
+			if (tab) {
+				out.tabs = {
+					idx: tab.idx,
+					total: tab.total,
+					ulCls: String((tab.ul && tab.ul.className) || ''),
+					items: tab.items.map(function (li, i) {
+						let html = '';
+						try {
+							html = squash(li.outerHTML, 400);
+						} catch (e) {}
+						return { i: i, cls: String(li.className || ''), text: tabLabel(li), html: html };
+					})
+				};
+			}
+		} catch (e) {}
+		return out;
+	}
+
+	function sendProbe() {
+		let body = '';
+		try {
+			body = JSON.stringify(collectProbe());
+		} catch (e) {
+			log('结构收集失败：' + e.message, 'error');
+			return;
+		}
+		log('正在上传结构（' + Math.round(body.length / 1024) + ' KB）…', 'info');
+		fetch('http://127.0.0.1:18080/probe', {
+			method: 'POST',
+			mode: 'cors',
+			headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+			body: body
+		})
+			.then(function (r) {
+				return r.json();
+			})
+			.then(function (j) {
+				log('结构已上传 → ' + j.file, 'success');
+			})
+			.catch(function (e) {
+				log('上传失败：' + e.message + '（本地服务没开？）', 'error');
+			});
+	}
+
 	function diagnose() {
 		const docs = allDocs();
 		const info = readIds();
@@ -1438,6 +2091,32 @@
 					'info'
 				);
 				if (it.src) log('        src=' + it.src, 'info');
+			});
+		}
+		// 任务点：区分视频型与附件/文档型
+		const jobs = jobPoints();
+		if (!jobs.length) {
+			log('任务点：没找到 .ans-job-icon（这个皮肤可能只写文本）', 'warn');
+			const txt = jobTextStatus();
+			log('        文本兜底：已完成 ' + txt.done + ' 处、未完成 ' + txt.undone + ' 处', 'info');
+		} else {
+			const fin = jobs.filter((j) => j.finished).length;
+			const att = jobs.filter((j) => !j.finished && !j.media).length;
+			log('任务点：共 ' + jobs.length + ' 个，已完成 ' + fin + ' 个，待完成附件/文档 ' + att + ' 个', 'info');
+			jobs.forEach((j, i) => {
+				log(
+					'  任务点#' +
+						i +
+						' ' +
+						(j.finished ? '[已完成]' : '[未完成]') +
+						' ' +
+						(j.media ? '[媒体]' : '[附件/文档]') +
+						' ' +
+						j.cls +
+						' < ' +
+						(j.parentCls || '?'),
+					'info'
+				);
 			});
 		}
 		const btnHit = (() => {
