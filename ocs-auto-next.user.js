@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OCS 任务点为空 · 自动下一节
 // @namespace    https://local.ocs.helper
-// @version      3.14.2
+// @version      3.14.3
 // @description  当 OCS 提示「页面任务点数量为空! 请刷新重试!」时，自动把超星课程切换到下一节；一直跳到没有下一节为止。
 // @author       YG
 // @namespace    https://github.com/KoishiYU/chaoxing-auto-next
@@ -28,7 +28,7 @@
 	}
 
 	const TAG = '[自动下一节]';
-	const VERSION = '3.14.2';
+	const VERSION = '3.14.3';
 	const STORE_KEY = 'ocs-auto-next:cfg:v3';
 	const LAST_JUMP_KEY = 'ocs-auto-next:lastjump';
 	const PENDING_KEY = 'ocs-auto-next:pending';
@@ -1187,6 +1187,7 @@
 		rt.mediaAt = 0;
 		rt.mediaCur = -1;
 		rt.deadMedia = {};
+		rt.idleSince = 0;
 	}
 
 	/**
@@ -1232,6 +1233,37 @@
 			if (cfg.learn && now() - rt.lastDriveAt > 2500) {
 				rt.lastDriveAt = now();
 				driveMedia();
+			} else if (!cfg.learn) {
+				// 「让 OCS 管」不等于「永远不碰」。
+				// 实测（第 197 节）：OCS 报完「任务点为空」就不再点播放，4 个 video 全部
+				// paused=true ready=0 dur=NaN，本节永远判不完，脚本就在那儿死等。
+				// 所以：30 秒内一个视频都没在播，就当作 OCS 放弃了，脚本接手。
+				const playing = mediaReport().some(function (it) {
+					return isRealMedia(it.el) && !it.paused;
+				});
+				if (playing) {
+					rt.idleSince = 0;
+				} else if (!rt.idleSince) {
+					rt.idleSince = now();
+					rt.learnNote = 'OCS 没在播放，30 秒后脚本接手';
+				} else if (now() - rt.idleSince > 30000) {
+					if (String(rt.learnNote || '').indexOf('脚本接手驱动') < 0) {
+						rt.learnNote = 'OCS 没在播放，脚本接手驱动';
+						log('30 秒没有视频在播，OCS 似乎放弃了本节，脚本接手', 'warn');
+					}
+					// 先点开未完成的媒体任务点，触发视频加载（ready=0 就是没人点过它）
+					if (now() - (rt.lastPickAt || 0) > 8000) {
+						rt.lastPickAt = now();
+						const vjobs = jobPoints().filter(function (j) {
+							return !j.finished && j.media;
+						});
+						if (vjobs.length) openJobPoint(vjobs[0]);
+					}
+					if (now() - rt.lastDriveAt > 2500) {
+						rt.lastDriveAt = now();
+						driveMedia();
+					}
+				}
 			}
 			return;
 		}
